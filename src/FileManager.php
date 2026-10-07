@@ -341,13 +341,24 @@ class FileManager
      */
     public function thumbnails($disk, $path): mixed
     {
+        // never attempt to render markup (HTML/SVG/XML) inline - these
+        // endpoints exist for raster image previews only, and passing
+        // attacker-controlled markup through here risks serving it
+        // back verbatim (stored XSS) if decoding doesn't rasterize it
+        if ($this->isMarkupExtension(pathinfo($path, PATHINFO_EXTENSION))) {
+            abort(415, 'Thumbnails are not supported for this file type.');
+        }
+
         return response()->make(
             Image::read(
                 Storage::disk($disk)->get($path))
                 ->coverDown(80, 80)
                 ->encode(),
             200,
-            ['Content-Type' => Storage::disk($disk)->mimeType($path)]
+            [
+                'Content-Type'           => Storage::disk($disk)->mimeType($path),
+                'X-Content-Type-Options' => 'nosniff',
+            ]
         );
     }
 
@@ -362,10 +373,18 @@ class FileManager
      */
     public function preview($disk, $path): mixed
     {
+        // see thumbnails() - never render markup inline through here
+        if ($this->isMarkupExtension(pathinfo($path, PATHINFO_EXTENSION))) {
+            abort(415, 'Preview is not supported for this file type.');
+        }
+
         return response()->make(
             Image::read(Storage::disk($disk)->get($path))->encode(),
             200,
-            ['Content-Type' => Storage::disk($disk)->mimeType($path)]
+            [
+                'Content-Type'           => Storage::disk($disk)->mimeType($path),
+                'X-Content-Type-Options' => 'nosniff',
+            ]
         );
     }
 
@@ -539,6 +558,21 @@ class FileManager
             $filename = basename($path);
         }
 
-        return Storage::disk($disk)->response($path, $filename, ['Accept-Ranges' => 'bytes']);
+        $headers = [
+            'Accept-Ranges'           => 'bytes',
+            'X-Content-Type-Options'  => 'nosniff',
+        ];
+
+        // this endpoint is meant for audio/video streaming, but
+        // serves whatever path it's given with Content-Disposition:
+        // inline - never do that for markup (HTML/SVG/XML), since a
+        // browser would render it (and any embedded script) in this
+        // application's own origin. Force a download instead; media
+        // files are unaffected.
+        if ($this->isMarkupExtension(pathinfo($path, PATHINFO_EXTENSION))) {
+            return Storage::disk($disk)->download($path, $filename, $headers);
+        }
+
+        return Storage::disk($disk)->response($path, $filename, $headers);
     }
 }

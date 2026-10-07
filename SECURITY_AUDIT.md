@@ -184,7 +184,29 @@ practical RCE path, not just an arbitrary-write curiosity.
 
 ## 🟠 High
 
-### [ ] 5. CVE-2025-63307 — Stored XSS via unrestricted HTML/SVG upload, create, and rename (CVSS 8.1)
+### [x] 5. CVE-2025-63307 — Stored XSS via unrestricted HTML/SVG upload, create, and rename (CVSS 8.1)
+
+**Fixed:** Rather than changing the `allowFileTypes` default (storing HTML/SVG assets is a
+legitimate use case for this package, unlike server-executable extensions — see #7), the
+fix targets where the actual XSS fires: the endpoints that serve file content *inline* in
+the app's own origin. Added `MARKUP_EXTENSIONS`/`isMarkupExtension()` to
+`FileTypeGuardTrait` (html, htm, xhtml, shtml, svg, svgz, xml, mhtml, mht) and used it in:
+- `streamFile()` — this is the real-world vector: it served any path with
+  `Content-Disposition: inline`, including an uploaded `.svg`/`.html`, rendering embedded
+  `<script>` in the app's origin. Markup extensions are now forced through
+  `Storage::disk()->download()` (attachment) instead of `->response()` (inline); actual
+  audio/video streaming is unaffected.
+- `preview()` / `thumbnails()` — these already route through Intervention Image's
+  decode/encode pipeline (which rasterizes real images, incidentally neutralizing most
+  SVG-script content), but now reject markup extensions outright with a `415` rather than
+  relying on that side effect across drivers/versions.
+- All three responses also now send `X-Content-Type-Options: nosniff` as defense-in-depth
+  against MIME-sniffing.
+
+The remaining angle — a direct URL to a `public`-disk file served straight by the
+webserver, bypassing this package's controller entirely — is a webserver/hosting concern
+outside this package's reach; see #10 for that documented limitation.
+
 **Status:** Confirmed present in this codebase.
 
 **Where:** `src/FileManager.php` — `upload()` (160-168), `createFile()` (415-438),
@@ -385,7 +407,7 @@ glob semantics that `fnmatch()` doesn't provide.
 | 2 | RCE via upload+rename extension bypass | CVE-2025-56399 | Critical (8.8) | Fixed |
 | 3 | Path traversal in unzip → arbitrary write | CVE-2025-65346 | Critical (9.1) | Fixed |
 | 4 | Path traversal in zip `name` param → arbitrary write | (unreported, same class as CVE-2025-65345) | Critical | Fixed |
-| 5 | Stored XSS via HTML/SVG upload | CVE-2025-63307 | High (8.1) | Open |
+| 5 | Stored XSS via HTML/SVG upload | CVE-2025-63307 | High (8.1) | Fixed |
 | 6 | Extension-only upload validation | — | High | Fixed |
 | 7 | No hard-coded dangerous-extension deny-list | — | High | Fixed |
 | 8 | Missing request validation for most inputs | — | Medium | Open |

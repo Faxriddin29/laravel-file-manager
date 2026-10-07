@@ -45,6 +45,35 @@ trait FileTypeGuardTrait
     ];
 
     /**
+     * Extensions a browser will parse as markup and may execute
+     * script from (HTML, SVG, XML-family documents). These are not
+     * server-executable, so they stay allowed to upload/store (many
+     * installs legitimately manage HTML/SVG site assets through this
+     * package) - but they must never be served *inline* by our own
+     * "preview"/"thumbnails"/"stream-file" endpoints, since that
+     * renders attacker-controlled markup/script in the application's
+     * own origin (stored XSS). See FileManager::streamFile/preview/
+     * thumbnails, which force a download/reject instead.
+     */
+    protected const MARKUP_EXTENSIONS = [
+        'html', 'htm', 'xhtml', 'shtml', 'svg', 'svgz', 'xml', 'mhtml', 'mht',
+    ];
+
+    /**
+     * @param  string|null  $extension
+     *
+     * @return bool
+     */
+    protected function isMarkupExtension(?string $extension): bool
+    {
+        if (!$extension) {
+            return false;
+        }
+
+        return in_array(strtolower($extension), self::MARKUP_EXTENSIONS, true);
+    }
+
+    /**
      * @param  string|null  $extension
      *
      * @return bool
