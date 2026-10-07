@@ -5,6 +5,7 @@ namespace Alexusmai\LaravelFileManager;
 use Alexusmai\LaravelFileManager\Middleware\FileManagerACL;
 use Alexusmai\LaravelFileManager\Services\ACLService\ACLRepository;
 use Alexusmai\LaravelFileManager\Services\ConfigService\ConfigRepository;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
 
 class FileManagerServiceProvider extends ServiceProvider
@@ -16,6 +17,8 @@ class FileManagerServiceProvider extends ServiceProvider
      */
     public function boot()
     {
+        $this->warnIfUnprotected();
+
         // routes
         $this->loadRoutesFrom(__DIR__.'/routes.php');
 
@@ -73,5 +76,39 @@ class FileManagerServiceProvider extends ServiceProvider
 
         // register ACL middleware
         $this->app['router']->aliasMiddleware('fm-acl', FileManagerACL::class);
+    }
+
+    /**
+     * The package ships with no authentication enforced by default -
+     * only the "web" middleware group (session + CSRF) and ACL off.
+     * Warn loudly at boot if nothing in the configured middleware
+     * stack looks like an auth guard and ACL is disabled, since that
+     * combination exposes every file-manager route (browse, upload,
+     * delete, download) to unauthenticated users.
+     *
+     * This is a warning only - it does not block route registration,
+     * since middleware names vary (auth, auth:sanctum, jwt.auth,
+     * a custom guard, ...) and we can't reliably detect every case.
+     *
+     * @return void
+     */
+    protected function warnIfUnprotected(): void
+    {
+        $config = $this->app->make(ConfigRepository::class);
+
+        $hasAuthMiddleware = collect($config->getMiddleware())
+            ->contains(fn ($middleware) => str_contains(
+                strtolower((string) $middleware), 'auth'
+            ));
+
+        if (!$hasAuthMiddleware && !$config->getAcl()) {
+            Log::warning(
+                '[laravel-file-manager] No authentication middleware detected in '
+                .'"file-manager.middleware" and ACL is disabled. The file manager '
+                .'routes (browse, upload, delete, download, ...) are reachable by '
+                .'unauthenticated users. Add an auth middleware (e.g. "auth") to '
+                .'config/file-manager.php or enable the ACL mechanism.'
+            );
+        }
     }
 }
