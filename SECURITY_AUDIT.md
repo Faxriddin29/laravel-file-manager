@@ -34,6 +34,16 @@ the risk impossible to miss in logs instead of silently relying on a comment in 
 file. Defaults in `config/file-manager.php` were left unchanged to avoid a silent
 breaking change; integrators still need to add `auth`/enable ACL themselves.
 
+**Follow-up fix (post-review):** the first version logged unconditionally every time
+`warnIfUnprotected()` ran — but a service provider's `boot()` runs on *every* HTTP
+request and Artisan command for the whole application, not just file-manager routes. On
+an install that's still unprotected (exactly the install this warning targets), that
+meant a log line on every single request with no de-dup, which is log spam at best and a
+disk-pressure risk at worst on anything with real traffic. Throttled via
+`Cache::has()`/`Cache::put(..., now()->addDay())` so it logs at most once per day; if the
+cache itself is unavailable the check fails open (logs anyway) rather than silently
+losing the warning.
+
 **Status:** Design flaw, not a CVE — but the root cause that makes every other issue
 remotely exploitable in real deployments.
 
@@ -69,6 +79,15 @@ This closes the exact CVE-2025-56399 chain — `shell.png` → rename to `shell.
 rejected with `fileTypeNotAllowed` because `php` is on the denylist, regardless of what
 `allowFileTypes` is configured to. See #6/#7 for the shared helper and the upload-side
 fix, and #3/#4's note above for the zip-extraction angle of the same root cause.
+
+**Follow-up fix (post-review):** the first version of this fix checked the new extension
+against the allowlist on *every* rename, not just when the extension actually changes —
+so renaming `notes.txt` to `notes-final.txt` would fail if `txt` wasn't in a configured
+`allowFileTypes`, even though nothing about the risk changed. Corrected to only enforce
+the allowlist when `strtolower($newExtension) !== strtolower($oldExtension)`; the
+dangerous-filename check (`.htaccess`, etc.) still always applies regardless of whether
+the extension changed. Verified against both the original CVE chain (still blocked) and
+the same-extension-rename case (now allowed) with a standalone test harness.
 
 **Status:** Confirmed present in this codebase (CVSS 8.8, authenticated).
 

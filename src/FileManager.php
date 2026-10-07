@@ -278,18 +278,34 @@ class FileManager
      */
     public function rename($disk, $newName, $oldName): array
     {
-        // re-validate the new extension/filename for files (not
-        // directories) - without this, an allowed upload (e.g. a
-        // ".png" containing PHP code) could be renamed to a
-        // dangerous extension (e.g. ".php") and then executed
+        // re-validate renames of files (not directories) - without
+        // this, an allowed upload (e.g. a ".png" containing PHP code)
+        // could be renamed to a dangerous extension (e.g. ".php") and
+        // then executed. The dangerous-filename check always applies
+        // (renaming anything to ".htaccess" is never fine), but the
+        // extension allowlist is only enforced when the extension is
+        // actually changing - a rename that keeps the same extension
+        // (e.g. fixing a typo in the base name) introduces no new
+        // risk, even if that extension wouldn't pass today's
+        // allowFileTypes (the file already existed with it).
         if (!Storage::disk($disk)->directoryExists($oldName)) {
-            $newExtension = pathinfo($newName, PATHINFO_EXTENSION);
+            if ($this->hasDangerousFilename(basename($newName))) {
+                return [
+                    'result' => [
+                        'status'  => 'danger',
+                        'message' => 'fileTypeNotAllowed',
+                    ],
+                ];
+            }
 
-            if (!$this->isAllowedExtension(
+            $newExtension = pathinfo($newName, PATHINFO_EXTENSION);
+            $oldExtension = pathinfo($oldName, PATHINFO_EXTENSION);
+
+            if (strtolower($newExtension) !== strtolower($oldExtension)
+                && !$this->isAllowedExtension(
                     $newExtension,
                     $this->configRepository->getAllowFileTypes()
                 )
-                || $this->hasDangerousFilename(basename($newName))
             ) {
                 return [
                     'result' => [
