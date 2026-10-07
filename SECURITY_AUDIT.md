@@ -163,10 +163,27 @@ rather than trusting the archive wholesale.
 
 **Fixed:** `Zip::createArchive()` now rejects the request up front via
 `isSafeArchiveName()`, which requires `name` to be a plain `basename()` (no directory
-separators, so it can never carry a path at all), reject any `..` sequence, and end in
-`.zip`. This closes both the traversal and the "write an arbitrary extension via the
-zip-name parameter" angle in one check — `name` can no longer place the new archive
-anywhere but inside the already-validated `path`/`disk`.
+separators, so it can never carry a path at all) and end in `.zip`. This closes both the
+traversal and the "write an arbitrary extension via the zip-name parameter" angle in one
+check — `name` can no longer place the new archive anywhere but inside the already-
+validated `path`/`disk`.
+
+**Follow-up fix (post-review):** the first version also rejected any `name` merely
+*containing* the substring `".."` (e.g. `report..final.zip` would have been rejected as a
+false positive). Removed that check entirely once I confirmed it's provably redundant
+here: `$name !== basename($name)` already guarantees no `/`, so `name` can never be a
+multi-segment path, and the mandatory `.zip` suffix means it can never literally equal
+`".."`. The same false-positive class existed in `isSafePathSegment()` (used for zip
+entries, the `folder` param, and — see below — the `elements` arrays) and in the
+pre-existing `elements['files']`/`elements['directories']` traversal checks in
+`createArchive()` (substring `strpos($x, '..')`, predating this audit); all three now use
+a proper segment-based check (`explode('/', ...)`, reject only a segment that's *exactly*
+`".."`), and the `elements` checks were upgraded from a bare `..`-substring test to the
+same `isSafePathSegment()` used elsewhere (now also catching absolute paths and stream
+wrappers there, which the original check never did — defense-in-depth already covered by
+`prefixer()`'s containment check, but tightened for consistency). Verified with 20
+standalone test cases covering both the false positives and that real traversal/absolute-
+path/stream-wrapper attempts are still rejected.
 
 **Status:** New finding from this audit (same vulnerability class/root cause as the
 publicly reported CVE-2025-65345, but via a different, unreported parameter).
@@ -375,6 +392,16 @@ failing throws, which `createArchive()`/`extractArchive()` now catch and turn in
 same fail-closed `*Failed` event + `false` return used everywhere else in this class. This
 is a backstop on top of the already-validated callers from #3/#4 (defense-in-depth against
 a future regression or an edge case those checks miss), not a replacement for them.
+
+**Follow-up fix (post-review) — performance:** the extra `path()`/`realpath()` work in
+`prefixer()` is cheap per call, but `addDirs()`'s per-file loop was already calling
+`fullPath()` (→ `prefixer()`) once *per file* being zipped, purely to recompute an
+invariant (the base path length used to compute each file's relative path within the
+archive) that never changes across that loop. Combined with the hardened `prefixer()`,
+zipping a directory with many files would have done several times more filesystem stat
+calls than before. Hoisted that computation out of the loop in `addDirs()` so it's
+computed once per `addDirs()` call instead of once per file — same result, no behavior
+change, removes the compounding cost.
 
 **Status:** New finding (root cause note for #4; relevant anywhere `->path()` is used).
 

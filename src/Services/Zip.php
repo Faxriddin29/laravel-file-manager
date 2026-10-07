@@ -156,20 +156,23 @@ class Zip
             return false;
         }
 
-        // Check files for traversal
+        // Check files for traversal/absolute paths/stream wrappers -
+        // isSafePathSegment() rejects a literal ".." path segment
+        // without false-positiving on a filename that merely contains
+        // ".." (e.g. "report..final.txt")
         if (isset($elements['files']) && is_array($elements['files'])) {
             foreach ($elements['files'] as $file) {
-                if (strpos($file, '..') !== false) {
+                if (!$this->isSafePathSegment($file, true)) {
                     event(new ZipFailed($this->request));
                     return false;
                 }
             }
         }
 
-        // Check directories for traversal
+        // Check directories for traversal/absolute paths/stream wrappers
         if (isset($elements['directories']) && is_array($elements['directories'])) {
             foreach ($elements['directories'] as $directory) {
-                if (strpos($directory, '..') !== false) {
+                if (!$this->isSafePathSegment($directory, true)) {
                     event(new ZipFailed($this->request));
                     return false;
                 }
@@ -305,9 +308,12 @@ class Zip
 
     /**
      * Validate a path segment supplied by the client (a "folder" name
-     * for extraction, or - with $allowNestedPaths - a raw zip entry
-     * name). Rejects traversal sequences, absolute paths, Windows
-     * drive letters, and stream wrappers.
+     * for extraction, a raw zip entry name, or - via createArchive() -
+     * an existing file/directory path being added to a new archive).
+     * Rejects traversal (a "../segment" or "segment/..", not merely a
+     * name that happens to *contain* ".." - e.g. "report..final.txt"
+     * is a perfectly ordinary filename, not a traversal attempt),
+     * absolute paths, Windows drive letters, and stream wrappers.
      *
      * @param  mixed  $value
      * @param  bool   $allowNestedPaths
@@ -322,7 +328,7 @@ class Zip
 
         $normalized = str_replace('\\', '/', $value);
 
-        if (str_contains($normalized, '..') || str_contains($normalized, '://')) {
+        if (str_contains($normalized, '://')) {
             return false;
         }
 
@@ -331,8 +337,16 @@ class Zip
             return false;
         }
 
-        if (!$allowNestedPaths && str_contains($normalized, '/')) {
+        $segments = explode('/', $normalized);
+
+        if (!$allowNestedPaths && count($segments) > 1) {
             return false;
+        }
+
+        foreach ($segments as $segment) {
+            if ($segment === '..') {
+                return false;
+            }
         }
 
         return true;
@@ -370,9 +384,14 @@ class Zip
 
     /**
      * Validate the name of the archive to be created. Must be a plain
-     * filename (no directory separators or traversal sequences) with
-     * a .zip extension, so it can't be used to write outside the
-     * target directory or with a dangerous extension.
+     * filename with a .zip extension, so it can't be used to write
+     * outside the target directory or with a dangerous extension.
+     *
+     * No separate ".." check is needed here: $name !== basename($name)
+     * already rejects anything containing "/" (so it can never be a
+     * multi-segment path), and the mandatory ".zip" suffix means it
+     * can never literally equal "..". A name like "report..final.zip"
+     * is a perfectly ordinary filename and must not be rejected.
      *
      * @param  mixed  $name
      *
@@ -381,10 +400,6 @@ class Zip
     protected function isSafeArchiveName($name): bool
     {
         if (!is_string($name) || $name === '' || $name !== basename($name)) {
-            return false;
-        }
-
-        if (str_contains($name, '..')) {
             return false;
         }
 
@@ -398,6 +413,14 @@ class Zip
      */
     protected function addDirs(array $directories)
     {
+        // invariant for the whole method (only depends on the
+        // top-level "path" request input, not on $directory/$file) -
+        // compute once rather than inside the per-file loop below,
+        // where it would otherwise re-resolve and re-validate
+        // (prefixer() does a realpath() round trip) on every single
+        // file being added to the archive
+        $basePathLength = strlen($this->fullPath($this->request->input('path')));
+
         foreach ($directories as $directory) {
 
             // Create recursive directory iterator
@@ -409,10 +432,7 @@ class Zip
             foreach ($files as $name => $file) {
                 // Get real and relative path for current item
                 $filePath = $file->getRealPath();
-                $relativePath = substr(
-                    $filePath,
-                    strlen($this->fullPath($this->request->input('path')))
-                );
+                $relativePath = substr($filePath, $basePathLength);
 
                 if (!$file->isDir()) {
                     // Add current file to archive
