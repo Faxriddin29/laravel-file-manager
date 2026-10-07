@@ -7,6 +7,7 @@ use Alexusmai\LaravelFileManager\Services\ConfigService\ConfigRepository;
 use Alexusmai\LaravelFileManager\Services\TransferService\TransferFactory;
 use Alexusmai\LaravelFileManager\Traits\CheckTrait;
 use Alexusmai\LaravelFileManager\Traits\ContentTrait;
+use Alexusmai\LaravelFileManager\Traits\FileTypeGuardTrait;
 use Alexusmai\LaravelFileManager\Traits\PathTrait;
 use Illuminate\Contracts\Container\BindingResolutionException;
 use Illuminate\Http\Response;
@@ -19,7 +20,7 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class FileManager
 {
-    use PathTrait, ContentTrait, CheckTrait;
+    use PathTrait, ContentTrait, CheckTrait, FileTypeGuardTrait;
 
     /**
      * @var ConfigRepository
@@ -156,12 +157,16 @@ class FileManager
                 continue;
             }
 
-            // check file type
-            if ($this->configRepository->getAllowFileTypes()
-                && !in_array(
+            // check file type - hard-coded dangerous extensions/filenames
+            // are always blocked; allowFileTypes (if set) is enforced on
+            // top of that, and the content is scanned for embedded
+            // script signatures regardless of the claimed extension
+            if (!$this->isAllowedExtension(
                     $file->getClientOriginalExtension(),
                     $this->configRepository->getAllowFileTypes()
                 )
+                || $this->hasDangerousFilename($file->getClientOriginalName())
+                || $this->containsExecutableSignature($file->getRealPath())
             ) {
                 $fileNotUploaded = true;
                 continue;
@@ -273,6 +278,28 @@ class FileManager
      */
     public function rename($disk, $newName, $oldName): array
     {
+        // re-validate the new extension/filename for files (not
+        // directories) - without this, an allowed upload (e.g. a
+        // ".png" containing PHP code) could be renamed to a
+        // dangerous extension (e.g. ".php") and then executed
+        if (!Storage::disk($disk)->directoryExists($oldName)) {
+            $newExtension = pathinfo($newName, PATHINFO_EXTENSION);
+
+            if (!$this->isAllowedExtension(
+                    $newExtension,
+                    $this->configRepository->getAllowFileTypes()
+                )
+                || $this->hasDangerousFilename(basename($newName))
+            ) {
+                return [
+                    'result' => [
+                        'status'  => 'danger',
+                        'message' => 'fileTypeNotAllowed',
+                    ],
+                ];
+            }
+        }
+
         Storage::disk($disk)->move($oldName, $newName);
 
         return [
@@ -414,6 +441,20 @@ class FileManager
      */
     public function createFile($disk, $path, $name): array
     {
+        if (!$this->isAllowedExtension(
+                pathinfo($name, PATHINFO_EXTENSION),
+                $this->configRepository->getAllowFileTypes()
+            )
+            || $this->hasDangerousFilename(basename($name))
+        ) {
+            return [
+                'result' => [
+                    'status'  => 'danger',
+                    'message' => 'fileTypeNotAllowed',
+                ],
+            ];
+        }
+
         $path = $this->newPath($path, $name);
 
         if (Storage::disk($disk)->exists($path)) {
@@ -448,6 +489,21 @@ class FileManager
      */
     public function updateFile($disk, $path, $file): array
     {
+        if (!$this->isAllowedExtension(
+                $file->getClientOriginalExtension(),
+                $this->configRepository->getAllowFileTypes()
+            )
+            || $this->hasDangerousFilename($file->getClientOriginalName())
+            || $this->containsExecutableSignature($file->getRealPath())
+        ) {
+            return [
+                'result' => [
+                    'status'  => 'danger',
+                    'message' => 'fileTypeNotAllowed',
+                ],
+            ];
+        }
+
         Storage::disk($disk)->putFileAs(
             $path,
             $file,

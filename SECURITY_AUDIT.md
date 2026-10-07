@@ -59,7 +59,17 @@ It also explains why these packages are a recurring target for mass internet sca
 
 ---
 
-### [ ] 2. CVE-2025-56399 — Remote Code Execution via upload + rename extension bypass
+### [x] 2. CVE-2025-56399 — Remote Code Execution via upload + rename extension bypass
+
+**Fixed:** `rename()` now re-validates the new name before moving the file (skipped for
+directories, detected via `Storage::disk($disk)->directoryExists()`): the new extension
+must pass `isAllowedExtension()` (hard-coded dangerous-extension denylist + the configured
+allowlist) and `basename($newName)` must not be a dangerous filename (`.htaccess`, etc.).
+This closes the exact CVE-2025-56399 chain — `shell.png` → rename to `shell.php` is now
+rejected with `fileTypeNotAllowed` because `php` is on the denylist, regardless of what
+`allowFileTypes` is configured to. See #6/#7 for the shared helper and the upload-side
+fix, and #3/#4's note above for the zip-extraction angle of the same root cause.
+
 **Status:** Confirmed present in this codebase (CVSS 8.8, authenticated).
 
 **Where:** `src/FileManager.php` — `upload()` (lines 141-203) and `rename()` (lines
@@ -203,7 +213,17 @@ takeover of other file-manager users (including admins, if ACL is misconfigured)
 
 ---
 
-### [ ] 6. Extension-only upload validation — no content/MIME verification
+### [x] 6. Extension-only upload validation — no content/MIME verification
+
+**Fixed:** Added `src/Traits/FileTypeGuardTrait.php`, shared by `FileManager` and `Zip`.
+Its `containsExecutableSignature()` streams a file in 8KB chunks (capped at 5MB, with a
+10-byte overlap so a signature straddling a chunk boundary isn't missed) and rejects it if
+it contains `<?php`, `<?=`, `<%`, or a `<script language="php">` tag, regardless of the
+claimed extension. This is now called from `upload()` and `updateFile()` — the two routes
+that receive raw file content from the client. (Full MIME-sniffing/`getimagesize()`
+validation per-type was considered but the signature scan was chosen as the direct fix for
+the disclosed CVE's exact technique — see the note on scope in #7.)
+
 **Status:** New finding (the root cause enabling #2 and contributing to #5).
 
 **Where:** `src/FileManager.php:159-168` (upload), `src/Requests/RequestValidator.php`
@@ -227,7 +247,22 @@ disclosed CVEs.
 
 ---
 
-### [ ] 7. No authoritative server-side allowlist of dangerous/executable extensions
+### [x] 7. No authoritative server-side allowlist of dangerous/executable extensions
+
+**Fixed:** `FileTypeGuardTrait` adds a hard-coded `DANGEROUS_EXTENSIONS` denylist (`php`
+and its variants, `phtml`, `phar`, `cgi`, `pl`, `py`, `rb`, `sh`, `asp`/`aspx`, `jsp`, `exe`,
+`bat`, `vbs`, `jar`, …) and a `DANGEROUS_FILENAMES` list for exact server-config filenames
+(`.htaccess`, `.htpasswd`, `.user.ini`, `web.config`, `php.ini`) that is enforced
+**independently of** `allowFileTypes` via `isAllowedExtension()`/`hasDangerousFilename()`.
+It is now checked on every write path that can affect a file's name or extension:
+`upload()`, `createFile()`, `updateFile()`, `rename()` (all in `FileManager.php`), and zip
+`extract()` (in `Zip::archiveEntriesAreSafe()`, which rejects the whole archive if any
+entry would land on disk with a dangerous extension/filename — closing the "upload an
+allowed `.zip`, extract a `.php` from inside it" bypass of the upload allowlist). `paste`
+(copy/cut) was deliberately left unchanged — it only moves/copies files that already exist
+on a managed disk and went through these checks when they were created, so it introduces
+no new extension.
+
 **Status:** New finding.
 
 **Where:** `config/file-manager.php:85` (`allowFileTypes`), `src/FileManager.php:160-168`.
@@ -347,12 +382,12 @@ glob semantics that `fnmatch()` doesn't provide.
 | # | Issue | CVE | Severity | Status |
 |---|-------|-----|----------|--------|
 | 1 | No auth enforced by default | — | Critical (enabler) | Fixed (warning added) |
-| 2 | RCE via upload+rename extension bypass | CVE-2025-56399 | Critical (8.8) | Open |
+| 2 | RCE via upload+rename extension bypass | CVE-2025-56399 | Critical (8.8) | Fixed |
 | 3 | Path traversal in unzip → arbitrary write | CVE-2025-65346 | Critical (9.1) | Fixed |
 | 4 | Path traversal in zip `name` param → arbitrary write | (unreported, same class as CVE-2025-65345) | Critical | Fixed |
 | 5 | Stored XSS via HTML/SVG upload | CVE-2025-63307 | High (8.1) | Open |
-| 6 | Extension-only upload validation | — | High | Open |
-| 7 | No hard-coded dangerous-extension deny-list | — | High | Open |
+| 6 | Extension-only upload validation | — | High | Fixed |
+| 7 | No hard-coded dangerous-extension deny-list | — | High | Fixed |
 | 8 | Missing request validation for most inputs | — | Medium | Open |
 | 9 | `->path()` bypasses Flysystem traversal protection | — | Medium | Open |
 | 10 | Public-disk URLs bypass ACL after issuance | — | Medium | Open |

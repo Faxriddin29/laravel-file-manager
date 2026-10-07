@@ -6,6 +6,7 @@ use Alexusmai\LaravelFileManager\Events\UnzipCreated;
 use Alexusmai\LaravelFileManager\Events\UnzipFailed;
 use Alexusmai\LaravelFileManager\Events\ZipCreated;
 use Alexusmai\LaravelFileManager\Events\ZipFailed;
+use Alexusmai\LaravelFileManager\Traits\FileTypeGuardTrait;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use RecursiveIteratorIterator;
@@ -14,6 +15,8 @@ use ZipArchive;
 
 class Zip
 {
+    use FileTypeGuardTrait;
+
     protected $zip;
     protected $request;
     //protected $pathPrefix;
@@ -198,9 +201,12 @@ class Zip
 
     /**
      * Check that every entry in the currently opened archive would
-     * extract to a location inside $destination. Protects against
-     * "Zip Slip" - entries using ".." segments or absolute paths to
-     * write outside the intended directory.
+     * extract to a location inside $destination, and that none of
+     * them has a dangerous extension or filename. Protects against
+     * "Zip Slip" (entries using ".." segments or absolute paths to
+     * write outside the intended directory) as well as using the
+     * extraction feature to smuggle in executable files that would
+     * never have been accepted through the regular upload checks.
      *
      * @param  string  $destination
      *
@@ -214,6 +220,14 @@ class Zip
             $entry = $this->zip->getNameIndex($i);
 
             if ($entry === false || !$this->isSafePathSegment($entry, true)) {
+                return false;
+            }
+
+            // directory entries end with "/" - no extension to check
+            if (!str_ends_with($entry, '/')
+                && ($this->hasDangerousExtension(pathinfo($entry, PATHINFO_EXTENSION))
+                    || $this->hasDangerousFilename(basename($entry)))
+            ) {
                 return false;
             }
 
