@@ -94,8 +94,14 @@ return [
      *
      * Add your middleware name to array -> ['web', 'auth', 'admin']
      * !!!! RESTRICT ACCESS FOR NON ADMIN USERS !!!!
+     *
+     * "throttle:120,1" rate-limits every file-manager route to 120
+     * requests/minute per user - raise/lower it to match your UI's
+     * actual call volume (e.g. a page that loads many thumbnails at
+     * once may need a higher limit). It only limits request rate, so
+     * it's safe to leave on even while you're still configuring auth.
      */
-    'middleware'        => ['web'],
+    'middleware'        => ['web', 'throttle:120,1'],
 
     /***************************************************************************
      * ACL mechanism ON/OFF
@@ -145,6 +151,20 @@ return [
      * 'path' => 'folder-name/*.jpg'
      *
      * * - wildcard
+     *
+     * !!! Matching is done with PHP's fnmatch(), which does NOT treat
+     * "/" as a special boundary the way shell globs often do. That
+     * means a wildcard can match further, or match a different
+     * sibling, than you might expect:
+     *   - 'folder1*' matches "folder1", "folder12", AND
+     *     "folder1-secret-admin-area" - anything sharing that
+     *     prefix, not just subfolders of "folder1".
+     *   - 'folder2/*' matches "folder2/anything/nested/this/deep",
+     *     because "*" also matches across further "/" separators.
+     * Always double-check a new rule against a real path you expect
+     * it to deny, not just the one you expect it to allow - prefer
+     * being more specific (e.g. 'folder1/*' and a separate exact
+     * 'folder1' rule) over a bare prefix wildcard when in doubt.
      *
      * access: 0 - deny, 1 - read, 2 - read/write
      */

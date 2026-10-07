@@ -35,6 +35,16 @@ class ACL
     /**
      * Get access level for selected path
      *
+     * Rules are matched with fnmatch(), which does NOT treat "/" as a
+     * special boundary - a rule like 'folder1*' matches "folder12"
+     * and "folder1-secret" as well as subfolders of "folder1", and
+     * 'folder2/*' matches arbitrarily deep nested paths under
+     * "folder2", not just its direct children. See the comment above
+     * "aclRules" in config/file-manager.php for examples; author
+     * rules with this in mind, especially under the "whitelist"
+     * strategy where an overly broad rule grants access rather than
+     * denying it.
+     *
      * @param        $disk
      * @param string $path
      *

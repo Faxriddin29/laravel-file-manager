@@ -306,7 +306,21 @@ regardless of what `allowFileTypes` says.
 
 ## 🟡 Medium
 
-### [ ] 8. `rename`, `paste`, and zip `elements` inputs are not validated by `RequestValidator`
+### [x] 8. `rename`, `paste`, and zip `elements` inputs are not validated by `RequestValidator`
+
+**Fixed:** `RequestValidator::rules()` now merges in `routeSpecificRules()`, which adds
+per-route rules keyed off `$this->route()->getName()` (mirroring how
+`FileManagerACL::CHECKERS` already maps route names to behavior): `files`/`file` as
+required file(s) for upload/update-file, `items.*.path`/`items.*.type` (`Rule::in(['file',
+'dir'])`) for delete, `clipboard.disk`/`clipboard.type` (`Rule::in(['copy','cut'])`) for
+paste, `oldName`/`newName` for rename, `name` for create-directory/create-file/zip,
+`elements`/`elements.files`/`elements.directories` for zip, and `folder` for unzip.
+Malformed requests now fail with a normal 422 instead of surfacing as an uncaught
+TypeError deeper in the service layer. This doesn't replace the path/extension/traversal
+checks added in #2–#7 and #9 (those remain the actual security boundary) — it's a shape/
+type validation layer in front of them, catching malformed input earlier and more
+predictably.
+
 **Status:** New finding.
 
 **Where:** `src/Requests/RequestValidator.php:28-56` — `rules()` only validates `disk` and
@@ -328,7 +342,21 @@ rule for anything that becomes a path component).
 
 ---
 
-### [ ] 9. `Storage::disk($disk)->path()` bypasses Flysystem's path-traversal protection by design
+### [x] 9. `Storage::disk($disk)->path()` bypasses Flysystem's path-traversal protection by design
+
+**Fixed:** `Zip::prefixer()` (the only place in the package calling `->path()` with
+user-influenced input) now independently verifies the resolved path before returning it:
+`isWithinRoot()` canonicalizes both the resolved path and the disk root (string-only,
+handles `..`/mixed separators, no filesystem access needed) and asserts the resolved path
+is a descendant of the root; separately, if the target already exists, `realpath()` is
+also compared against `realpath()` of the root, which catches a symlink planted inside the
+disk root pointing outside it (a case the string-only check can't see, since the path
+*string* looks perfectly safe while the filesystem resolves it elsewhere). Either check
+failing throws, which `createArchive()`/`extractArchive()` now catch and turn into the
+same fail-closed `*Failed` event + `false` return used everywhere else in this class. This
+is a backstop on top of the already-validated callers from #3/#4 (defense-in-depth against
+a future regression or an edge case those checks miss), not a replacement for them.
+
 **Status:** New finding (root cause note for #4; relevant anywhere `->path()` is used).
 
 **Where:** `src/Services/Zip.php:85-88` (`prefixer()`), and anywhere else `->path($path)`
@@ -350,7 +378,16 @@ filesystem operation that doesn't go through Flysystem.
 
 ---
 
-### [ ] 10. Download/stream/preview/thumbnail endpoints ACL-exempt granularity gaps when ACL is enabled
+### [x] 10. Download/stream/preview/thumbnail endpoints ACL-exempt granularity gaps when ACL is enabled
+
+**Addressed (documentation):** This is an inherent property of serving files directly from
+a public disk, not a code defect this package can fix in `url()` itself — so the fix here
+is making the limitation impossible to miss rather than papering over it. Added an
+"Important limitations" section to `docs/acl.md` ("ACL does not protect direct storage
+URLs") spelling out exactly this behavior and the recommended mitigation (proxy bytes
+through an authenticated action instead of relying on a public disk for anything
+ACL-sensitive).
+
 **Status:** New finding (defense-in-depth gap, only relevant once ACL is turned on).
 
 **Where:** `src/Middleware/FileManagerACL.php` — `checkContent()` (121-125) requires only
@@ -374,6 +411,17 @@ ACL'd content — proxy file bytes through an authenticated controller action in
 ## 🟢 Informational / hardening
 
 ### [ ] 11. Filename slugification is opt-in and off by default
+
+**Reviewed, left as-is:** `config/file-manager.php:165` (`'slugifyNames' => false`).
+Deliberately **not** flipped to `true` by default: unlike #12 below, this changes
+user-facing output (stored filenames) for every fresh install, which can break an
+integrator's existing assumptions (links built from original filenames, etc.) for a
+benefit that's speculative rather than a concrete vulnerability found in this codebase —
+no shell-out-on-filename or similar path was found during this audit. Leaving this as an
+explicit opt-in (`'slugifyNames' => true` in your published config) is the right call
+unless you have a specific reason (e.g. integrating with tooling that's picky about
+filenames) to turn it on.
+
 **Where:** `config/file-manager.php:165` (`'slugifyNames' => false`).
 Leaving this off means uploaded filenames retain arbitrary user-supplied characters
 (spaces, unicode, etc.) — mostly a usability/portability concern, but unusual filenames
@@ -381,13 +429,31 @@ Leaving this off means uploaded filenames retain arbitrary user-supplied charact
 on stored filenames. Not currently observed in this codebase, but worth enabling by
 default for defense-in-depth.
 
-### [ ] 12. No rate limiting / brute-force protection on any route
+### [x] 12. No rate limiting / brute-force protection on any route
+
+**Fixed:** `config/file-manager.php` default `middleware` is now `['web',
+'throttle:120,1']` (120 requests/minute per user), with a comment explaining the number is
+a starting point to tune against your actual UI call volume (e.g. a view that loads many
+thumbnails at once). This only limits request *rate* — it doesn't change who can access
+anything — so it's safe to ship on by default.
+
 **Where:** `src/routes.php`, `config/file-manager.php:98`.
 No `throttle` middleware is included in the default middleware stack. Combined with
 finding #1, an exposed instance can be scraped/bulk-downloaded or have its disk filled via
 repeated uploads with no rate limiting. Add `throttle:...` to the default middleware list.
 
-### [ ] 13. `ACL::getAccessLevel()` uses `fnmatch()` for path matching
+### [x] 13. `ACL::getAccessLevel()` uses `fnmatch()` for path matching
+
+**Addressed (documentation):** This is how `fnmatch()` works, not a bug to patch around
+without changing matching semantics for everyone's existing rules (a real behavior change
+with its own risk of silently altering who has access to what). Documented instead, in
+the two places someone would actually be looking when authoring a rule: a detailed comment
+block directly above `aclRules` in `config/file-manager.php` with concrete
+prefix/cross-boundary examples, a matching docblock on `ACL::getAccessLevel()`, and an
+"Important limitations" section in `docs/acl.md` (the same place #10's note landed) that
+specifically calls out the dynamic-username-as-glob-pattern risk in Example 2's own
+`\Auth::user()->name` rule.
+
 **Where:** `src/Services/ACLService/ACL.php:48-50`.
 `fnmatch()` pattern semantics can surprise (e.g. `*` matches across `/` boundaries,
 unlike typical "glob per path segment" expectations), which can cause ACL rules to be
@@ -410,25 +476,38 @@ glob semantics that `fnmatch()` doesn't provide.
 | 5 | Stored XSS via HTML/SVG upload | CVE-2025-63307 | High (8.1) | Fixed |
 | 6 | Extension-only upload validation | — | High | Fixed |
 | 7 | No hard-coded dangerous-extension deny-list | — | High | Fixed |
-| 8 | Missing request validation for most inputs | — | Medium | Open |
-| 9 | `->path()` bypasses Flysystem traversal protection | — | Medium | Open |
-| 10 | Public-disk URLs bypass ACL after issuance | — | Medium | Open |
-| 11 | Slugify filenames off by default | — | Info | Open |
-| 12 | No rate limiting | — | Info | Open |
-| 13 | `fnmatch()` ACL semantics sharp edge | — | Info | Open |
+| 8 | Missing request validation for most inputs | — | Medium | Fixed |
+| 9 | `->path()` bypasses Flysystem traversal protection | — | Medium | Fixed |
+| 10 | Public-disk URLs bypass ACL after issuance | — | Medium | Documented |
+| 11 | Slugify filenames off by default | — | Info | Reviewed, left as-is (see notes) |
+| 12 | No rate limiting | — | Info | Fixed |
+| 13 | `fnmatch()` ACL semantics sharp edge | — | Info | Documented |
 
 **Note on upstream status:** As of this audit, CVE-2025-56399, CVE-2025-63307,
 CVE-2025-65345, and CVE-2025-65346 all show **no patched version available** upstream.
-This repo (HEAD `74bebe3`) still contains all four. Fixes here will need to be applied
-locally (and ideally upstreamed as a PR) rather than pulled in via a version bump.
+This repo (HEAD `74bebe3`) contained all four prior to this pass. All fixes in this
+document were applied locally; consider upstreaming them as a PR rather than waiting for
+a version bump.
 
 ---
 
-## Suggested fix order
+## Suggested fix order (completed)
 
-1. **#1** (auth/ACL posture) — biggest leverage, blocks remote exploitation of everything else.
-2. **#3, #4** (zip/unzip arbitrary write) — most direct path to RCE, same code area, fix together.
-3. **#2, #6, #7** (upload/rename extension & content validation) — same root cause, fix together.
-4. **#5** (XSS serving) — depends on #6/#7's allowlist work.
-5. **#8, #9, #10** — hardening once the critical paths are closed.
-6. **#11, #12, #13** — cheap wins, do whenever convenient.
+1. **#1** (auth/ACL posture) — biggest leverage, blocks remote exploitation of everything else. ✅
+2. **#3, #4** (zip/unzip arbitrary write) — most direct path to RCE, same code area, fixed together. ✅
+3. **#2, #6, #7** (upload/rename extension & content validation) — same root cause, fixed together. ✅
+4. **#5** (XSS serving) — built on #6/#7's allowlist work. ✅
+5. **#8, #9, #10** — hardening once the critical paths were closed. ✅
+6. **#11, #12, #13** — cheap wins. ✅ (#11 reviewed and deliberately left at its default — see its notes)
+
+## What's left
+
+Every tracked finding has been addressed in code or documentation. Two items are worth
+revisiting periodically rather than considered permanently closed:
+- **#1** is a warning, not an enforced block — re-check `config/file-manager.php`'s
+  `middleware`/`acl` settings whenever this package is reconfigured.
+- **#11** was a deliberate no-op (default left as shipped) — revisit if this install's
+  threat model changes (e.g. filenames ever get passed to shell commands elsewhere in the
+  app).
+
+No further action is queued unless new findings come up in a future review.

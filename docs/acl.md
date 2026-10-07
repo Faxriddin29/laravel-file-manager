@@ -180,6 +180,40 @@ class UsersACLRepository implements ACLRepository
 ```
 
 
+## Important limitations
+
+### Wildcard rules match across "/" boundaries
+
+Rules are matched with PHP's `fnmatch()`, which does **not** treat `/` as a special
+boundary the way a shell glob usually does:
+
+- `'path' => 'folder1*'` matches `folder1`, `folder12`, and `folder1-secret-admin-area` -
+  any sibling sharing that prefix, not just subfolders of `folder1`.
+- `'path' => 'folder2/*'` matches `folder2/anything/nested/this/deep`, because `*` also
+  matches across further `/` separators - not just `folder2`'s direct children.
+
+This is especially risky under the **whitelist** strategy (Example 2 above), where a rule
+that matches more than you intended *grants* access rather than denying it - e.g. in
+`['disk' => 'disk-name', 'path' => 'users/'. \Auth::user()->name .'/*', 'access' => 2]`,
+if a username could ever contain `*`, `?`, or `[`, it would be interpreted as a glob
+pattern rather than a literal name. Prefer narrower, explicit rules over a bare prefix
+wildcard when you're not sure, and test a new rule against a path you expect it to *deny*,
+not just one you expect it to allow.
+
+### ACL does not protect direct storage URLs
+
+ACL governs requests that go through this package's own routes (`content`, `preview`,
+`download`, ...). It does **not** retroactively protect a file once a direct URL to it has
+been handed out via the `url` endpoint (`Storage::disk($disk)->url($path)`): for the
+`public` disk (or any disk with a public, webserver-reachable URL), that URL is served
+directly by the webserver/storage driver, bypassing this package - and therefore bypassing
+ACL - entirely. In practice this means "read access in the file manager" for a file on a
+public disk is equivalent to "permanent, unauthenticated access to that file's URL for
+anyone who obtains it," regardless of ACL rules or later revocation. If you need
+access that can be revoked per-user, don't rely on a public disk/symlinked storage for
+that content - proxy the file's bytes through your own authenticated controller action
+instead.
+
 ## What's next
 
 [Events](./events.md)

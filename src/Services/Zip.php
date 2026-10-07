@@ -85,9 +85,59 @@ class Zip
         ];
     }
 
+    /**
+     * Resolve $path to a native filesystem path via Storage::path().
+     *
+     * Storage::path() bypasses Flysystem's own path normalizer (which
+     * is what rejects ".." traversal on put/copy/move/exists/...) -
+     * it just concatenates the disk root with $path. Everywhere in
+     * this class that calls this method already validates $path
+     * first (isSafePathSegment(), isSafeArchiveName(), or the
+     * RequestValidator-checked "path" input), but this is a
+     * defense-in-depth backstop: it independently asserts the
+     * resolved path stays inside the disk root, and - for anything
+     * that already exists - that its *real* (symlink-resolved)
+     * location does too, since a string check alone can't catch a
+     * symlink planted inside the disk root pointing elsewhere.
+     *
+     * @param  string  $path
+     *
+     * @return string
+     *
+     * @throws \RuntimeException  if the resolved path escapes the disk root
+     */
     protected function prefixer($path): string
     {
-        return Storage::disk($this->request->input('disk'))->path($path);
+        $disk     = Storage::disk($this->request->input('disk'));
+        $resolved = $disk->path($path);
+        $root     = $disk->path('');
+
+        if (!$this->isWithinRoot($resolved, $root)) {
+            throw new \RuntimeException('Resolved path escapes the disk root.');
+        }
+
+        $realResolved = realpath($resolved);
+        $realRoot     = realpath($root);
+
+        if ($realResolved && $realRoot && !$this->isWithinRoot($realResolved, $realRoot)) {
+            throw new \RuntimeException('Resolved path escapes the disk root.');
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * @param  string  $path
+     * @param  string  $root
+     *
+     * @return bool
+     */
+    protected function isWithinRoot(string $path, string $root): bool
+    {
+        $path = $this->canonicalize($path);
+        $root = $this->canonicalize($root);
+
+        return $path === $root || str_starts_with($path, $root.'/');
     }
 
     /**
@@ -126,30 +176,34 @@ class Zip
             }
         }
 
-        // create or overwrite archive
-        if ($this->zip->open(
-                $this->createName(),
-                ZIPARCHIVE::OVERWRITE | ZIPARCHIVE::CREATE
-            ) === true
-        ) {
-            if (isset($elements['files']) && $elements['files']) {
-                foreach ($elements['files'] as $file) {
-                    $this->zip->addFile(
-                        $this->prefixer($file),
-                        basename($file)
-                    );
+        try {
+            // create or overwrite archive
+            if ($this->zip->open(
+                    $this->createName(),
+                    ZIPARCHIVE::OVERWRITE | ZIPARCHIVE::CREATE
+                ) === true
+            ) {
+                if (isset($elements['files']) && $elements['files']) {
+                    foreach ($elements['files'] as $file) {
+                        $this->zip->addFile(
+                            $this->prefixer($file),
+                            basename($file)
+                        );
+                    }
                 }
+
+                if (isset($elements['directories']) && $elements['directories']) {
+                    $this->addDirs($elements['directories']);
+                }
+
+                $this->zip->close();
+
+                event(new ZipCreated($this->request));
+
+                return true;
             }
-
-            if (isset($elements['directories']) && $elements['directories']) {
-                $this->addDirs($elements['directories']);
-            }
-
-            $this->zip->close();
-
-            event(new ZipCreated($this->request));
-
-            return true;
+        } catch (\RuntimeException $exception) {
+            // a resolved path escaped the disk root - see prefixer()
         }
 
         event(new ZipFailed($this->request));
@@ -164,9 +218,6 @@ class Zip
      */
     protected function extractArchive(): bool
     {
-        $zipPath = $this->prefixer($this->request->input('path'));
-        $rootPath = dirname($zipPath);
-
         // extract to new folder
         $folder = $this->request->input('folder');
 
@@ -175,23 +226,30 @@ class Zip
             return false;
         }
 
-        $destination = $folder ? $rootPath.'/'.$folder : $rootPath;
+        try {
+            $zipPath  = $this->prefixer($this->request->input('path'));
+            $rootPath = dirname($zipPath);
 
-        if ($this->zip->open($zipPath) === true) {
-            // guard against Zip Slip - reject the archive if any entry
-            // would extract outside the destination directory
-            if (!$this->archiveEntriesAreSafe($destination)) {
+            $destination = $folder ? $rootPath.'/'.$folder : $rootPath;
+
+            if ($this->zip->open($zipPath) === true) {
+                // guard against Zip Slip - reject the archive if any entry
+                // would extract outside the destination directory
+                if (!$this->archiveEntriesAreSafe($destination)) {
+                    $this->zip->close();
+                    event(new UnzipFailed($this->request));
+                    return false;
+                }
+
+                $this->zip->extractTo($destination);
                 $this->zip->close();
-                event(new UnzipFailed($this->request));
-                return false;
+
+                event(new UnzipCreated($this->request));
+
+                return true;
             }
-
-            $this->zip->extractTo($destination);
-            $this->zip->close();
-
-            event(new UnzipCreated($this->request));
-
-            return true;
+        } catch (\RuntimeException $exception) {
+            // a resolved path escaped the disk root - see prefixer()
         }
 
         event(new UnzipFailed($this->request));
